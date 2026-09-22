@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.env
+venv/
+.venv/
+env/
+
+# PyInstaller / Build
+build/
+dist/
+*.spec
+
+# Logs and runtime artifacts
+*.log
+ocr_test.log
+screenshot.png
+unrecognized/*.png
+
+# User backups containing tokens/personal settings
+backup/config_*.yaml
+
+# IDE & OS
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
+.DS_Store
+

@@ -1,0 +1,20 @@
+adb_port: 5555
+click_delay: 0.5
+resolution: FHD (1920x1080 - 240DPI)
+filter:
+  min_5star: 1
+  need_5star: 0
+target_costumes: []
+discord:
+  enabled: false
+  bot_token: ''
+  channel_id: ''
+  user_id: ''
+  share_error: false
+  share_complete: false
+options:
+  shutdown_pc_on_completion: false
+  auto_add_new_costume: true
+  debug_mode: false
+  ocr_test_5star: false
+  match_threshold: 0.8

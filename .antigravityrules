@@ -1,0 +1,4 @@
+# Agent Instructions
+1. Always respond in Korean (항상 한국어로 답변할 것).
+2. Concise output: Do not repeat entire source files. Only output concise diffs or modified functions (전체 코드 재출력 금지, 수정된 부분만 제시).
+3. Skip conversational pleasantries (불필요한 인사나 사설 생략).

@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="ko">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>BD2 Controller Panel</title>
+  <link rel="shortcut icon" href="{{ url_for('static', filename='favicon.ico') }}">
+  <link rel="stylesheet" href="/static/css/style.css">
+  <style>
+    .log-btn-group {
+      display: flex;
+      gap: 6px;
+    }
+
+    .log-action-btn {
+      background-color: #2d2d2d;
+      color: #b0b0b0;
+      border: 1px solid #444;
+      border-radius: 4px;
+      padding: 2px 8px;
+      cursor: pointer;
+      font-size: 0.8rem;
+    }
+
+    .log-action-btn:hover {
+      background-color: #444;
+      color: #fff;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="container">
+    <h1>BD2 Controller Web UI</h1>
+    <nav class="tab-menu">
+      <button class="tab-btn active" onclick="openTab(event, 'tab-main')">무한뽑기 매크로</button>
+      <button class="tab-btn" onclick="openTab(event, 'tab-db')">DB 데이터 관리</button>
+      <button class="tab-btn" onclick="openTab(event, 'tab-extra')">(확장용)</button>
+    </nav>
+    <div class="app-layout">
+      <div class="left-panel">
+        <div id="tab-main" class="tab-content active">
+          <form id="config-form" onsubmit="event.preventDefault(); saveConfig();">
+            <section class="card">
+              <h2>기본 설정 (ADB & 시스템)</h2>
+              <div class="form-grid">
+                <div class="form-group">
+                  <label>ADB 포트번호</label>
+                  <input type="number" id="adb_port" value="5555">
+                </div>
+                <div class="form-group">
+                  <label>클릭 딜레이 (초)</label>
+                  <input type="number" step="0.1" id="click_delay" value="0.5">
+                </div>
+                <div class="form-group">
+                  <label>해상도 선택 (DB 연동)</label>
+                  <select id="resolution"></select>
+                </div>
+                <div class="form-group">
+                  <label>이미지 인식 임계값 (0.01 ~ 1.0)</label>
+                  <input type="number" step="0.01" id="global_match_threshold" value="0.80">
+                </div>
+              </div>
+            </section>
+            <section class="card">
+              <h2>ADB 연결 및 인식 테스트</h2>
+              <div class="btn-group" style="margin-bottom: 15px; display: flex; gap: 10px;">
+                <button type="button" class="secondary-btn" onclick="connectADB()">ADB 연결 테스트</button>
+                <button type="button" class="danger-btn" onclick="disconnectADB()">ADB 연결 해제</button>
+              </div>
+              <div class="form-grid">
+                <div class="form-group">
+                  <label>X 좌표</label>
+                  <input type="number" id="click_x" placeholder="예: 960">
+                </div>
+                <div class="form-group">
+                  <label>Y 좌표</label>
+                  <input type="number" id="click_y" placeholder="예: 540">
+                </div>
+              </div>
+              <button type="button" class="primary-btn" style="margin-top: 10px;" onclick="sendADBClick()">입력한 좌표 클릭 테스트</button>
+            </section>
+            <section class="card">
+              <h2>뽑기 & 코스튬 필터</h2>
+              <div class="form-grid">
+                <div class="form-group">
+                  <label>최소 5성 개수</label>
+                  <input type="number" id="min_5star" value="1">
+                </div>
+                <div class="form-group">
+                  <label>희망 5성 개수</label>
+                  <input type="number" id="need_5star" value="1">
+                </div>
+              </div>
+            </section>
+            <section class="card">
+              <h2>희망 코스튬 설정</h2>
+              <div id="costume-list"></div>
+              <button type="button" class="secondary-btn" onclick="addCostumeRow()">+ 코스튬 추가</button>
+            </section>
+            <section class="card">
+              <h2>디스코드 봇 연동</h2>
+              <div class="form-checkbox">
+                <input type="checkbox" id="discord_enabled">
+                <label for="discord_enabled">디스코드 봇 연동 활성화 (ON/OFF)</label>
+              </div>
+              <div class="form-grid" style="margin-top: 15px;">
+                <div class="form-group" style="grid-column: span 2;">
+                  <label>봇 토큰 (Bot Token)</label>
+                  <input type="password" id="discord_bot_token" placeholder="Bot Token 입력">
+                </div>
+                <div class="form-group">
+                  <label>전송 채널 ID (Channel ID)</label>
+                  <input type="text" id="discord_channel_id" placeholder="예: 123456789012345678">
+                </div>
+                <div class="form-group">
+                  <label>알림 대상 사용자 ID (User ID)</label>
+                  <input type="text" id="discord_user_id" placeholder="예: 987654321098765432 (선택사항)">
+                </div>
+              </div>
+              <div class="form-checkbox" style="margin-top: 10px;">
+                <input type="checkbox" id="discord_share_error">
+                <label for="discord_share_error">오류 발생 시 디스코드 알림/공유</label>
+              </div>
+              <div class="form-checkbox">
+                <input type="checkbox" id="discord_share_complete">
+                <label for="discord_share_complete">완료 시 결과창 디스코드 공유</label>
+              </div>
+              <div style="margin-top: 15px;">
+                <button type="button" class="secondary-btn" style="width: 100%;" onclick="testDiscordMessage()">📢 디스코드 연동 테스트 메시지 전송</button>
+              </div>
+            </section>
+            <section class="card">
+              <h2>기타 부가 옵션</h2>
+              <div class="form-checkbox">
+                <input type="checkbox" id="shutdown_pc_on_completion">
+                <label for="shutdown_pc_on_completion">매크로 완료 시 PC 자동 종료</label>
+              </div>
+              <div class="form-checkbox">
+                <input type="checkbox" id="auto_add_new_costume">
+                <label for="auto_add_new_costume">신규 코스튬 자동 추가 (OFF시 이미지만 폴더 저장)</label>
+              </div>
+              <div class="form-checkbox">
+                <input type="checkbox" id="debug_mode">
+                <label for="debug_mode">서버 콘솔 디버그 모드 (ADB 클릭 좌표, 판독 점수 등 상세 출력)</label>
+              </div>
+              <div class="form-checkbox">
+                <input type="checkbox" id="ocr_test_5star">
+                <label for="ocr_test_5star">5성 코스튬 항상 OCR 테스트 (5성 감지 시 상세창 열어 OCR 검증 및 ocr_test.log 기록)</label>
+              </div>
+            </section>
+            <div class="btn-group">
+              <button type="submit" class="primary-btn">설정 저장 (자동 백업)</button>
+            </div>
+          </form>
+          <section class="card" style="margin-top: 20px;">
+            <h2>백업 복원 (불러오기)</h2>
+            <div class="backup-restore-box">
+              <select id="backup-select">
+                <option value="">-- 백업 파일 선택 --</option>
+              </select>
+              <button type="button" class="secondary-btn" onclick="restoreBackup()">선택 백업으로 복원</button>
+            </div>
+          </section>
+        </div>
+        <div id="tab-extra" class="tab-content">
+          <section class="card">
+            <h2>부가 기능 설정</h2>
+            <p style="color: #a0a0a0;">추후 기능 확장 시 여기에 새로운 기능 제어 메뉴를 추가할 수 있습니다.</p>
+          </section>
+        </div>
+        <div id="tab-db" class="tab-content">
+          <section class="card">
+            <h2>해상도 테이블 (resolutions)</h2>
+            <div class="table-wrapper">
+              <table class="db-table" id="table-resolutions">
+                <thead>
+                  <tr>
+                    <th>Width</th>
+                    <th>Height</th>
+                    <th>DPI</th>
+                    <th>이름</th>
+                    <th>가챠 좌표</th>
+                    <th>스킵 좌표</th>
+                    <th>확인 좌표</th>
+                    <th>결과 영역</th>
+                    <th>스크린샷 영역</th>
+                    <th>작업</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <h3 style="margin-top: 20px; font-size: 0.95rem; color: #bb86fc;">신규 해상도 추가</h3>
+            <form onsubmit="event.preventDefault(); addResolutionRecord();">
+              <div class="form-grid">
+                <input type="number" id="add_res_w" placeholder="Width (예: 1920)" required>
+                <input type="number" id="add_res_h" placeholder="Height (예: 1080)" required>
+                <input type="number" id="add_res_dpi" placeholder="DPI (예: 240)" required>
+                <input type="text" id="add_res_name" placeholder="해상도 이름" required>
+                <input type="text" id="add_res_gacha" placeholder='가챠 좌표 JSON'>
+                <input type="text" id="add_res_skip" placeholder='스킵 좌표 JSON'>
+                <input type="text" id="add_res_confirm" placeholder='확인 좌표 JSON'>
+                <input type="text" id="add_res_roi" placeholder='가챠 결과 ROI JSON'>
+                <input type="text" id="add_res_ss_roi" placeholder='스크린샷 ROI JSON'>
+              </div>
+              <div class="db-add-footer">
+                <button type="submit" class="btn-db-add">+ 해상도 추가</button>
+              </div>
+            </form>
+          </section>
+          <!-- 코스튬 관리 카드 -->
+          <section class="card">
+            <h2>코스튬 테이블 (costumes)</h2>
+            <div class="table-wrapper">
+              <table class="db-table" id="table-costumes">
+                <thead>
+                  <tr>
+                    <th>ID</th>
+                    <th>캐릭터_코스튬명</th>
+                    <th>레어도</th>
+                    <th>이미지 파일명</th>
+                    <th>작업</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <h3 id="costume-form-title" style="margin-top: 20px; font-size: 0.95rem; color: #bb86fc;">신규 코스튬 추가</h3>
+            <form onsubmit="event.preventDefault(); saveCostumeRecord();">
+              <input type="hidden" id="edit_costume_id" value="">
+              <div class="form-grid">
+                <input type="text" id="add_costume_name" placeholder="캐릭터_코스튬명" required>
+                <input type="number" id="add_costume_rarity" value="5" placeholder="레어도 (기본 5)">
+                <input type="text" id="add_costume_img" placeholder="이미지 파일명.확장자">
+              </div>
+              <div class="db-add-footer" style="display: flex; gap: 10px; justify-content: flex-end;">
+                <button type="button" id="costume-cancel-btn" class="secondary-btn" style="display: none; padding: 8px 18px;" onclick="resetCostumeForm()">취소</button>
+                <button type="submit" id="costume-submit-btn" class="btn-db-add">+ 코스튬 추가</button>
+              </div>
+            </form>
+          </section>
+          <section class="card">
+            <h2>명칭 보정 (오탐) 관리</h2>
+            <div class="form-grid" style="grid-template-columns: 1fr 1fr; gap: 24px; align-items: start;">
+              <div>
+                <h3 style="font-size: 0.95rem; color: #bb86fc; margin-bottom: 10px;">캐릭터명 보정</h3>
+                <div class="table-wrapper">
+                  <table class="db-table" id="table-char-corrections">
+                    <thead>
+                      <tr>
+                        <th>오탐 단어</th>
+                        <th>올바른 단어</th>
+                        <th>작업</th>
+                      </tr>
+                    </thead>
+                    <tbody></tbody>
+                  </table>
+                </div>
+                <form onsubmit="event.preventDefault(); addCorrection('char');" style="margin-top: 10px; display: flex; gap: 8px;">
+                  <input type="text" id="char-wrong" placeholder="오탐 단어" required style="flex: 1; padding: 6px;">
+                  <input type="text" id="char-correct" placeholder="올바른 단어" required style="flex: 1; padding: 6px;">
+                  <button type="submit" class="btn-db-add">저장</button>
+                </form>
+              </div>
+              <div>
+                <h3 style="font-size: 0.95rem; color: #bb86fc; margin-bottom: 10px;">코스튬명 보정</h3>
+                <div class="table-wrapper">
+                  <table class="db-table" id="table-costume-corrections">
+                    <thead>
+                      <tr>
+                        <th>오탐 단어</th>
+                        <th>올바른 단어</th>
+                        <th>작업</th>
+                      </tr>
+                    </thead>
+                    <tbody></tbody>
+                  </table>
+                </div>
+                <form onsubmit="event.preventDefault(); addCorrection('costume');" style="margin-top: 10px; display: flex; gap: 8px;">
+                  <input type="text" id="costume-wrong" placeholder="오탐 단어" required style="flex: 1; padding: 6px;">
+                  <input type="text" id="costume-correct" placeholder="올바른 단어" required style="flex: 1; padding: 6px;">
+                  <button type="submit" class="btn-db-add">저장</button>
+                </form>
+              </div>
+            </div>
+          </section>
+          <section class="card" style="margin-top: 20px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+              <h2 style="margin: 0; border: none; padding: 0;">미인식 코스튬 수동 등록 (unrecognized 폴더)</h2>
+              <button type="button" class="secondary-btn" onclick="loadUnrecognizedImages()" style="padding: 6px 12px; font-size: 0.85rem;">🔄 목록 새로고침</button>
+            </div>
+            <p style="color: #a0a0a0; font-size: 0.88rem; margin-top: 0;">자동 등록이 꺼져있을 때 수집된 미인식 카드 이미지를 확인하고 정식 DB에 등록합니다.</p>
+            <div id="unrecognized-container" style="display: flex; flex-direction: column; gap: 15px; margin-top: 15px;">
+              <!-- JS로 동적 생성될 리스트 영역 -->
+              <p style="color: #777;">불러오는 중...</p>
+            </div>
+          </section>
+        </div>
+      </div>
+      <div class="right-panel">
+        <section class="card sticky-card">
+          <h2>매크로 실행 제어</h2>
+          <div class="macro-status-box">
+            <span>현재 상태: </span>
+            <strong id="macro-status-text" class="status-stopped">중지됨</strong>
+          </div>
+          <div class="macro-btn-group">
+            <button type="button" id="btn-start" class="start-btn" onclick="startMacro()">매크로 시작</button>
+            <button type="button" id="btn-stop" class="stop-btn" onclick="stopMacro()" disabled>매크로 중지</button>
+          </div>
+          <div class="log-section">
+            <div class="log-header">
+              <span>실행 로그 (Log)</span>
+              <div class="log-btn-group">
+                <button type="button" class="log-action-btn" onclick="openOcrLogModal()">OCR 로그</button>
+                <button type="button" id="toggle-log-btn" class="log-action-btn" onclick="toggleFullscreenLog()">전체화면</button>
+                <button type="button" class="log-action-btn" onclick="clearLog()">초기화</button>
+              </div>
+            </div>
+            <!-- resize 속성 유지(일반 상태일때 조절) -->
+            <div id="log-window" class="log-window" style="height: 230px; resize: vertical; overflow: auto;">
+              <div class="log-entry system">[SYSTEM] 매크로 제어반 준비 완료.</div>
+            </div>
+          </div>
+        </section>
+      </div>
+    </div>
+    <div id="status-message"></div>
+    <!-- 5성 코스튬 OCR 테스트 로그 모달 -->
+    <div id="ocr-log-modal" class="modal-backdrop" style="display: none;" onclick="if(event.target===this) closeOcrLogModal()">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3 style="margin: 0; font-size: 1.1rem; color: #bb86fc;">📋 5성 코스튬 OCR 테스트 로그 (ocr_test.log)</h3>
+          <button type="button" class="modal-close-btn" onclick="closeOcrLogModal()">&times;</button>
+        </div>
+        <div class="modal-toolbar" style="display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid #333;">
+          <span id="ocr-log-info" style="color: #a0a0a0; font-size: 0.85rem;"></span>
+          <div style="display: flex; gap: 8px;">
+            <button type="button" class="secondary-btn" style="padding: 4px 10px; font-size: 0.82rem;" onclick="loadOcrTestLog()">🔄 새로고침</button>
+            <button type="button" class="danger-btn" style="padding: 4px 10px; font-size: 0.82rem;" onclick="clearOcrTestLog()">🗑️ 로그 비우기</button>
+          </div>
+        </div>
+        <pre id="ocr-log-viewer" class="ocr-log-pre" style="margin-top: 10px; background: #181818; color: #eee; padding: 12px; border-radius: 4px; font-family: 'Consolas', monospace; font-size: 0.83rem; max-height: 480px; overflow: auto; white-space: pre-wrap; line-height: 1.5; border: 1px solid #333;">불러오는 중...</pre>
+      </div>
+    </div>
+  </div>
+  <script src="/static/js/app.js"></script>
+</body>
+
+</html>
