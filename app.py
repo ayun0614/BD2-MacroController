@@ -521,24 +521,90 @@ def save_cv2_image_utf8(filepath, img):
 # ==============================================================================
 # 4. ADB 제어 로직
 # ==============================================================================
-def check_and_connect_adb(device_id):
-    """
-    ADB 장치 연결을 시도하고 상태(device)를 검증합니다.
-    성공 시 (True, '성공 메시지'), 실패 시 (False, '실패 원인') 반환
-    """
+def get_target_device_id(config=None):
+    """설정된 adb_device가 있으면 해당 ID(시리얼 또는 IP:포트)를, 없으면 기본 IP:포트를 반환"""
+    if config is None:
+        config = load_config()
+    adb_dev = (config.get("adb_device") or "").strip()
+    if adb_dev:
+        return adb_dev
+    return f"127.0.0.1:{config.get('adb_port', 5555)}"
+
+
+def get_connected_devices():
+    """adb devices -l 출력을 파싱하여 연결된 기기 목록 반환"""
     try:
-        debug_log(f"ADB 연결 시도: {device_id}")
-        subprocess.run(
-            f"{ADB_BIN} connect {device_id}",
+        res = subprocess.run(
+            f"{ADB_BIN} devices -l",
             shell=True,
             capture_output=True,
             text=True,
             errors="replace",
-            timeout=10,
+            timeout=5,
         )
+        lines = (res.stdout or "").splitlines()
+        devices = []
+        for line in lines:
+            line = line.strip()
+            if not line or line.startswith("List of devices"):
+                continue
+            parts = line.split()
+            if len(parts) >= 2:
+                dev_id = parts[0]
+                state = parts[1].lower()
+                dev_info = {
+                    "id": dev_id,
+                    "state": state,
+                    "model": "",
+                    "product": "",
+                    "type": (
+                        "network"
+                        if (":" in dev_id or dev_id.startswith("127.0.0.1"))
+                        else "usb"
+                    ),
+                }
+                for p in parts[2:]:
+                    if ":" in p:
+                        k, v = p.split(":", 1)
+                        if k == "model":
+                            dev_info["model"] = v
+                        elif k == "product":
+                            dev_info["product"] = v
+
+                if not dev_info["model"]:
+                    dev_info["model"] = dev_id
+
+                devices.append(dev_info)
+        return devices
+    except Exception as e:
+        debug_log(f"기기 목록 조회 실패: {e}")
+        return []
+
+
+def check_and_connect_adb(device_id):
+    """
+    ADB 장치 연결을 시도하고 상태(device)를 검증합니다.
+    - IP:포트 형태 (네트워크/에뮬레이터)인 경우: adb connect 시도
+    - USB 시리얼 형태인 경우: adb connect를 부르지 않고 adb devices 목록 확인
+    성공 시 (True, '성공 메시지'), 실패 시 (False, '실패 원인') 반환
+    """
+    try:
+        is_network = ":" in device_id or device_id.startswith("127.0.0.1")
+        if is_network:
+            debug_log(f"네트워크 ADB 연결 시도: {device_id}")
+            subprocess.run(
+                f"{ADB_BIN} connect {device_id}",
+                shell=True,
+                capture_output=True,
+                text=True,
+                errors="replace",
+                timeout=10,
+            )
+        else:
+            debug_log(f"USB/시리얼 기기 상태 확인: {device_id}")
 
         devices_result = subprocess.run(
-            f"{ADB_BIN} devices",
+            f"{ADB_BIN} devices -l",
             shell=True,
             capture_output=True,
             text=True,
@@ -553,17 +619,104 @@ def check_and_connect_adb(device_id):
                 state = parts[1].lower()
                 if state == "device":
                     return True, f"ADB 장치 ({device_id}) 정상 연결됨"
+                elif state == "unauthorized":
+                    return (
+                        False,
+                        f"기기 승인 필요: 휴대전화 화면에서 'USB 디버깅을 항상 허용'을 눌러주세요.",
+                    )
+                elif state == "offline":
+                    return (
+                        False,
+                        f"기기가 오프라인 상태입니다. USB 케이블 연결을 확인하세요.",
+                    )
                 else:
                     return False, f"ADB 장치 ({device_id}) 상태 비정상 ({state})"
 
         return (
             False,
-            f"ADB 장치 목록에서 '{device_id}'를 찾을 수 없거나 오프라인 상태입니다.",
+            f"ADB 장치 목록에서 '{device_id}'를 찾을 수 없습니다. 케이블 연결 및 USB 디버깅 설정을 확인하세요.",
         )
     except subprocess.TimeoutExpired:
         return False, f"ADB 응답 시간 초과 ({device_id})"
     except Exception as e:
         return False, f"ADB 연결 중 오류 발생: {e}"
+
+
+def get_device_resolution(device_id):
+    """선택된 기기의 물리 해상도 및 현재 적용된 해상도(Override size) 조회"""
+    try:
+        res = subprocess.run(
+            f"{ADB_BIN} -s {device_id} shell wm size",
+            shell=True,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=5,
+        )
+        stdout = res.stdout or ""
+        physical = ""
+        override = ""
+        for line in stdout.splitlines():
+            line = line.strip()
+            if "Physical size:" in line:
+                physical = line.replace("Physical size:", "").strip()
+            elif "Override size:" in line:
+                override = line.replace("Override size:", "").strip()
+        return physical, override
+    except Exception as e:
+        debug_log(f"해상도 조회 오류: {e}")
+        return "", ""
+
+
+def set_device_resolution(device_id, width, height, density=None):
+    """기기 해상도 및 DPI 임시 변경 (선택사항)"""
+    try:
+        subprocess.run(
+            f"{ADB_BIN} -s {device_id} shell wm size {width}x{height}",
+            shell=True,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=5,
+        )
+        if density:
+            subprocess.run(
+                f"{ADB_BIN} -s {device_id} shell wm density {density}",
+                shell=True,
+                capture_output=True,
+                text=True,
+                errors="replace",
+                timeout=5,
+            )
+        return True
+    except Exception as e:
+        debug_log(f"해상도 변경 실패: {e}")
+        return False
+
+
+def reset_device_resolution(device_id):
+    """기기 해상도 및 DPI 원래대로 복구"""
+    try:
+        subprocess.run(
+            f"{ADB_BIN} -s {device_id} shell wm size reset",
+            shell=True,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=5,
+        )
+        subprocess.run(
+            f"{ADB_BIN} -s {device_id} shell wm density reset",
+            shell=True,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=5,
+        )
+        return True
+    except Exception as e:
+        debug_log(f"해상도 복구 실패: {e}")
+        return False
 
 
 def capture_adb_screenshot(device_id):
@@ -723,20 +876,31 @@ def run_gacha_macro_loop():
     macro_log("🚀 [매크로] 루프 프로세스가 백그라운드에서 시작되었습니다.")
 
     config = load_config()
-    adb_port = config.get("adb_port", 5555)
-    device_id = f"127.0.0.1:{adb_port}"
+    device_id = get_target_device_id(config)
 
     macro_log(f"🔌 [ADB 연결 확인] {device_id} 연결을 시도하고 상태를 확인합니다...")
     connected, msg = check_and_connect_adb(device_id)
     if not connected:
         macro_log(f"❌ [ADB 연결 실패] {msg}")
         macro_log(
-            "[매크로 중단] ADB 연결에 실패하여 매크로를 시작할 수 없습니다. 포트 설정 및 앱플레이어 실행 상태를 확인해 주세요."
+            "[매크로 중단] ADB 연결에 실패하여 매크로를 시작할 수 없습니다. 기기 연결 및 USB 디버깅/포트 설정을 확인해 주세요."
         )
         is_macro_running = False
         return
 
     macro_log(f"✅ [ADB 연결 성공] {device_id} 정상 연결 확인됨.")
+
+    # 선택적 해상도 자동 맞춤 (기본값: False)
+    options = config.get("options", {})
+    auto_fhd_applied = False
+    if options.get("auto_fhd_resolution", False):
+        p_size, _ = get_device_resolution(device_id)
+        if p_size and p_size not in ["1080x1920", "1920x1080"]:
+            macro_log(
+                f"📱 [해상도 자동 맞춤] 16:9 FHD(1080x1920)로 임시 변경합니다. (기기 원래 해상도: {p_size})"
+            )
+            if set_device_resolution(device_id, 1080, 1920, 400):
+                auto_fhd_applied = True
 
     loop_count = 0
 
@@ -749,9 +913,8 @@ def run_gacha_macro_loop():
 
             config = load_config()
             selected_res = config.get("resolution")
-            adb_port = config.get("adb_port", 5555)
             click_delay = float(config.get("click_delay", 0.5))
-            device_id = f"127.0.0.1:{adb_port}"
+            device_id = get_target_device_id(config)
 
             options = config.get("options", {})
             # config.yaml에서 공통 인식률 불러오기
@@ -1158,6 +1321,10 @@ def run_gacha_macro_loop():
                 pass
             time.sleep(1.0)
 
+    if auto_fhd_applied:
+        macro_log("📱 [해상도 복구] 기기 화면 해상도를 원래대로 복원합니다.")
+        reset_device_resolution(device_id)
+
     is_macro_running = False
     macro_log("[매크로] 백그라운드 루프가 완전 종료되었습니다.")
 
@@ -1279,11 +1446,92 @@ def run_action():
         return jsonify({"status": "error", "message": str(e)}), 500
 
 
+@app.route("/api/adb/devices", methods=["GET"])
+def adb_devices_list():
+    """연결된 모든 ADB 기기(앱플레이어, 실제 USB 스마트폰/태블릿 등) 목록 반환"""
+    try:
+        devices = get_connected_devices()
+        return jsonify({"status": "success", "devices": devices})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route("/api/adb/device-resolution", methods=["GET"])
+def adb_get_device_resolution():
+    """현재 선택된 타깃 기기의 해상도 정보 조회"""
+    try:
+        config = load_config()
+        device_id = get_target_device_id(config)
+        physical, override = get_device_resolution(device_id)
+        return jsonify(
+            {
+                "status": "success",
+                "device_id": device_id,
+                "physical_size": physical,
+                "override_size": override,
+                "is_fhd": (override in ["1080x1920", "1920x1080"])
+                or (not override and physical in ["1080x1920", "1920x1080"]),
+            }
+        )
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route("/api/adb/device-resolution/fhd", methods=["POST"])
+def adb_set_device_resolution_fhd():
+    """사용자가 직접 선택하여 16:9 FHD(1080x1920) 해상도로 변경"""
+    try:
+        config = load_config()
+        device_id = get_target_device_id(config)
+        success = set_device_resolution(device_id, 1080, 1920, 400)
+        if success:
+            macro_log(
+                f"📱 수동 설정: [{device_id}] 해상도를 1080x1920 (FHD)로 맞추었습니다."
+            )
+            return jsonify(
+                {
+                    "status": "success",
+                    "message": f"기기({device_id}) 해상도가 1080x1920 (FHD)로 변경되었습니다.",
+                }
+            )
+        return (
+            jsonify({"status": "error", "message": "해상도 변경 명령 실행 실패"}),
+            500,
+        )
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
+@app.route("/api/adb/device-resolution/reset", methods=["POST"])
+def adb_reset_device_resolution():
+    """사용자가 직접 원래 기기 해상도로 복원"""
+    try:
+        config = load_config()
+        device_id = get_target_device_id(config)
+        success = reset_device_resolution(device_id)
+        if success:
+            macro_log(
+                f"📱 수동 설정: [{device_id}] 해상도를 원래 기본값으로 복원했습니다."
+            )
+            return jsonify(
+                {
+                    "status": "success",
+                    "message": f"기기({device_id}) 해상도가 원래 기본값으로 복원되었습니다.",
+                }
+            )
+        return (
+            jsonify({"status": "error", "message": "해상도 복원 명령 실행 실패"}),
+            500,
+        )
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
+
 @app.route("/api/adb/connect", methods=["POST"])
 def adb_connect():
     try:
         config = load_config()
-        device_id = f"127.0.0.1:{config.get('adb_port', 5555)}"
+        device_id = get_target_device_id(config)
         connected, msg = check_and_connect_adb(device_id)
 
         if connected:
@@ -1312,7 +1560,7 @@ def adb_click():
             return jsonify({"status": "error", "message": "X, Y 좌표 필요"}), 400
 
         config = load_config()
-        device_id = f"127.0.0.1:{config.get('adb_port', 5555)}"
+        device_id = get_target_device_id(config)
         subprocess.run(
             f"{ADB_BIN} -s {device_id} shell input tap {int(x)} {int(y)}",
             shell=True,
@@ -1329,21 +1577,29 @@ def adb_click():
 def adb_disconnect():
     try:
         config = load_config()
-        device_id = f"127.0.0.1:{config.get('adb_port', 5555)}"
-        result = subprocess.run(
-            f"{ADB_BIN} disconnect {device_id}",
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        return jsonify(
-            {
-                "status": "success",
-                "message": f"ADB 장치 ({device_id}) 해제됨",
-                "output": result.stdout.strip(),
-            }
-        )
+        device_id = get_target_device_id(config)
+        if ":" in device_id or device_id.startswith("127.0.0.1"):
+            result = subprocess.run(
+                f"{ADB_BIN} disconnect {device_id}",
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            return jsonify(
+                {
+                    "status": "success",
+                    "message": f"ADB 네트워크 장치 ({device_id}) 연결 해제됨",
+                    "output": result.stdout.strip(),
+                }
+            )
+        else:
+            return jsonify(
+                {
+                    "status": "success",
+                    "message": f"USB 연결 장치 ({device_id})는 PC 케이블 분리 시 연결이 해제됩니다.",
+                }
+            )
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
 

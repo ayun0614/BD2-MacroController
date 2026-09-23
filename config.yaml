@@ -1,8 +1,9 @@
+adb_device: ''
 adb_port: 5555
 click_delay: 0.5
-resolution: FHD (1920x1080 - 240DPI)
+resolution: FHD (1920x1080 - 280DPI)
 filter:
-  min_5star: 1
+  min_5star: 2
   need_5star: 0
 target_costumes: []
 discord:
@@ -13,6 +14,7 @@ discord:
   share_error: false
   share_complete: false
 options:
+  auto_fhd_resolution: false
   shutdown_pc_on_completion: false
   auto_add_new_costume: true
   debug_mode: false

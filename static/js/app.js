@@ -1,4 +1,5 @@
 let dbData = { resolutions: [], costumes: [] };
+let currentTargetDevice = '';
 
 document.addEventListener('DOMContentLoaded', async () => {
   await fetchDbData();
@@ -6,6 +7,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   await loadBackupList();
   await loadCorrections();
   await loadUnrecognizedImages();
+  await fetchAdbDevices();
+  await checkDeviceResolution();
   await pollLogsAndStatus(); // 페이지 로드 시 상태 및 로그 즉시 동기화
 });
 
@@ -78,6 +81,11 @@ async function loadConfig() {
 function populateUI(config) {
   if (!config) return;
 
+  if (config.adb_device !== undefined) {
+    currentTargetDevice = config.adb_device;
+    fetchAdbDevices(config.adb_device);
+  }
+
   if (document.getElementById('adb_port'))
     document.getElementById('adb_port').value = config.adb_port ?? 5555;
   if (document.getElementById('click_delay'))
@@ -126,6 +134,9 @@ function populateUI(config) {
   }
 
   if (config.options) {
+    if (document.getElementById('auto_fhd_resolution'))
+      document.getElementById('auto_fhd_resolution').checked =
+        !!config.options.auto_fhd_resolution;
     if (document.getElementById('shutdown_pc_on_completion'))
       document.getElementById('shutdown_pc_on_completion').checked =
         !!config.options.shutdown_pc_on_completion;
@@ -194,6 +205,7 @@ async function saveConfig() {
 
   // '?'(옵셔널 체이닝)을 사용하여 HTML 요소가 없어도 에러 없이 기본값을 넣도록 안전하게 처리
   const payload = {
+    adb_device: document.getElementById('adb_device')?.value?.trim() || '',
     adb_port: Number(document.getElementById('adb_port')?.value || 5555),
     click_delay: Number(document.getElementById('click_delay')?.value || 0.5),
     resolution: document.getElementById('resolution')?.value || '',
@@ -215,6 +227,8 @@ async function saveConfig() {
         document.getElementById('discord_share_complete')?.checked || false,
     },
     options: {
+      auto_fhd_resolution:
+        document.getElementById('auto_fhd_resolution')?.checked || false,
       shutdown_pc_on_completion:
         document.getElementById('shutdown_pc_on_completion')?.checked || false,
       auto_add_new_costume:
@@ -416,6 +430,147 @@ function setMacroState(isRunning) {
       statusText.innerText = '중지됨';
       statusText.className = 'status-stopped';
     }
+  }
+}
+
+// ADB 기기 목록 조회 및 드롭다운 채우기
+async function fetchAdbDevices(targetDev = null) {
+  const select = document.getElementById('adb_device');
+  const btn = document.querySelector('.btn-refresh-device');
+  if (!select) return;
+
+  const currentVal =
+    targetDev !== null ? targetDev : select.value || currentTargetDevice;
+
+  if (btn) btn.innerText = '⏳ 검색 중...';
+
+  try {
+    const response = await fetch('/api/adb/devices');
+    const result = await response.json();
+    if (result.status === 'success') {
+      const devices = result.devices || [];
+      select.innerHTML = '';
+
+      // 기본 옵션: 앱플레이어 기본값 (127.0.0.1:포트)
+      const defaultOpt = document.createElement('option');
+      defaultOpt.value = '';
+      defaultOpt.innerText = '💻 앱플레이어 기본 (127.0.0.1:포트번호)';
+      select.appendChild(defaultOpt);
+
+      devices.forEach((dev) => {
+        const opt = document.createElement('option');
+        opt.value = dev.id;
+        let icon = dev.type === 'usb' ? '📱' : '🌐';
+        let stateText = '';
+        if (dev.state === 'unauthorized') stateText = ' [⚠️승인필요]';
+        else if (dev.state === 'offline') stateText = ' [⚠️오프라인]';
+
+        opt.innerText = `${icon} [${dev.type.toUpperCase()}] ${dev.model} (${dev.id})${stateText}`;
+        select.appendChild(opt);
+      });
+
+      // 기존에 설정된 값이 목록에 없으면 추가
+      if (
+        currentVal &&
+        !Array.from(select.options).some((o) => o.value === currentVal)
+      ) {
+        const customOpt = document.createElement('option');
+        customOpt.value = currentVal;
+        customOpt.innerText = `⚙️ ${currentVal}`;
+        select.appendChild(customOpt);
+      }
+
+      select.value = currentVal;
+      currentTargetDevice = currentVal;
+      await checkDeviceResolution();
+    }
+  } catch (err) {
+    console.error('ADB 기기 목록 조회 실패:', err);
+  } finally {
+    if (btn) btn.innerText = '🔄 기기 검색';
+  }
+}
+
+// 기기 변경 이벤트
+async function onAdbDeviceChanged() {
+  const select = document.getElementById('adb_device');
+  if (!select) return;
+  currentTargetDevice = select.value;
+
+  // 포트번호 자동 추출 (127.0.0.1:5555 형태인 경우)
+  if (currentTargetDevice.includes(':')) {
+    const parts = currentTargetDevice.split(':');
+    const port = Number(parts[1]);
+    if (port && document.getElementById('adb_port')) {
+      document.getElementById('adb_port').value = port;
+    }
+  }
+
+  await checkDeviceResolution();
+}
+
+// 선택된 기기의 해상도 상태 조회
+async function checkDeviceResolution() {
+  const badge = document.getElementById('device-res-badge');
+  if (!badge) return;
+
+  try {
+    const response = await fetch('/api/adb/device-resolution');
+    const result = await response.json();
+    if (result.status === 'success') {
+      const p = result.physical_size || '미확인';
+      const o = result.override_size;
+      if (o) {
+        badge.innerText = `✨ ${o} (16:9 맞춤 중 / 원래: ${p})`;
+        badge.classList.add('active-fhd');
+      } else {
+        badge.innerText = `해상도: ${p} (기본값)`;
+        badge.classList.remove('active-fhd');
+      }
+    } else {
+      badge.innerText = '기기 미연결';
+      badge.classList.remove('active-fhd');
+    }
+  } catch (err) {
+    badge.innerText = '해상도 확인 불가';
+    badge.classList.remove('active-fhd');
+  }
+}
+
+// 16:9 FHD(1080x1920)로 수동 맞춤
+async function setDeviceResolutionFHD() {
+  try {
+    addLog(
+      '📱 기기 화면 해상도를 16:9 FHD(1080x1920)로 맞추는 중...',
+      'system',
+    );
+    const response = await fetch('/api/adb/device-resolution/fhd', {
+      method: 'POST',
+    });
+    const result = await response.json();
+    showMessage(result.message, result.status !== 'success');
+    addLog(result.message, result.status === 'success' ? 'info' : 'error');
+    await checkDeviceResolution();
+  } catch (err) {
+    showMessage('해상도 변경 실패', true);
+    addLog('해상도 변경 중 통신 에러 발생', 'error');
+  }
+}
+
+// 원래 해상도로 수동 복구
+async function resetDeviceResolution() {
+  try {
+    addLog('📱 기기 화면 해상도를 원래대로 복원하는 중...', 'system');
+    const response = await fetch('/api/adb/device-resolution/reset', {
+      method: 'POST',
+    });
+    const result = await response.json();
+    showMessage(result.message, result.status !== 'success');
+    addLog(result.message, result.status === 'success' ? 'info' : 'error');
+    await checkDeviceResolution();
+  } catch (err) {
+    showMessage('해상도 복구 실패', true);
+    addLog('해상도 복구 중 통신 에러 발생', 'error');
   }
 }
 
