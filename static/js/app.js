@@ -720,53 +720,83 @@ function renderDbTables() {
 }
 
 function editResolution(r) {
-  document.getElementById('add_res_w').value = r.width;
-  document.getElementById('add_res_h').value = r.height;
-  document.getElementById('add_res_dpi').value = r.dpi;
-  document.getElementById('add_res_name').value = r.name;
-  document.getElementById('add_res_gacha').value = r.gacha_btn_pos || '';
-  document.getElementById('add_res_skip').value = r.skip_btn_pos || '';
-  document.getElementById('add_res_confirm').value = r.confirm_btn_pos || '';
-  document.getElementById('add_res_roi').value = r.result_roi || '';
-  document.getElementById('add_res_ss_roi').value = r.screenshot_roi || '';
+  const setVal = (id, val) => {
+    const el = document.getElementById(id);
+    if (el) el.value = val !== undefined && val !== null ? val : '';
+  };
+  setVal('add_res_w', r.width);
+  setVal('add_res_h', r.height);
+  setVal('add_res_dpi', r.dpi);
+  setVal('add_res_name', r.name);
+  setVal('add_res_gacha', r.gacha_btn_pos);
+  setVal('add_res_skip', r.skip_btn_pos);
+  setVal('add_res_confirm', r.confirm_btn_pos);
+  setVal('add_res_roi', r.result_roi);
+  setVal('add_res_ss_roi', r.screenshot_roi);
 
-  document.getElementById('res-form-title').innerText =
-    `해상도 수정 (${r.name})`;
-  document.getElementById('res-submit-btn').innerText = '해상도 수정 저장';
-  document.getElementById('res-cancel-btn').style.display = 'inline-block';
-  document
-    .getElementById('res-form-title')
-    .scrollIntoView({ behavior: 'smooth' });
+  const title = document.getElementById('res-form-title');
+  if (title) {
+    title.innerText = `해상도 수정 (${r.name})`;
+    title.scrollIntoView({ behavior: 'smooth' });
+  }
+  const submitBtn = document.getElementById('res-submit-btn');
+  if (submitBtn) submitBtn.innerText = '해상도 수정 저장';
+  const cancelBtn = document.getElementById('res-cancel-btn');
+  if (cancelBtn) cancelBtn.style.display = 'inline-block';
 }
 
 function resetResolutionForm() {
-  document.getElementById('add_res_w').value = '';
-  document.getElementById('add_res_h').value = '';
-  document.getElementById('add_res_dpi').value = '';
-  document.getElementById('add_res_name').value = '';
-  document.getElementById('add_res_gacha').value = '';
-  document.getElementById('add_res_skip').value = '';
-  document.getElementById('add_res_confirm').value = '';
-  document.getElementById('add_res_roi').value = '';
-  document.getElementById('add_res_ss_roi').value = '';
+  const fields = [
+    'add_res_w',
+    'add_res_h',
+    'add_res_dpi',
+    'add_res_name',
+    'add_res_gacha',
+    'add_res_skip',
+    'add_res_confirm',
+    'add_res_roi',
+    'add_res_ss_roi',
+  ];
+  fields.forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.value = '';
+  });
 
-  document.getElementById('res-form-title').innerText = '신규 해상도 추가';
-  document.getElementById('res-submit-btn').innerText = '+ 해상도 추가';
-  document.getElementById('res-cancel-btn').style.display = 'none';
+  const title = document.getElementById('res-form-title');
+  if (title) title.innerText = '신규 해상도 추가';
+  const submitBtn = document.getElementById('res-submit-btn');
+  if (submitBtn) submitBtn.innerText = '+ 해상도 추가';
+  const cancelBtn = document.getElementById('res-cancel-btn');
+  if (cancelBtn) cancelBtn.style.display = 'none';
 }
 
 async function saveResolutionRecord() {
+  const w = Number(document.getElementById('add_res_w')?.value);
+  const h = Number(document.getElementById('add_res_h')?.value);
+  const dpi = Number(document.getElementById('add_res_dpi')?.value);
+  const name = document.getElementById('add_res_name')?.value?.trim();
+
+  if (!w || !h || !name) {
+    alert('Width, Height, 해상도 이름은 필수 입력 항목입니다.');
+    return;
+  }
+
   const payload = {
-    width: Number(document.getElementById('add_res_w').value),
-    height: Number(document.getElementById('add_res_h').value),
-    dpi: Number(document.getElementById('add_res_dpi').value),
-    name: document.getElementById('add_res_name').value,
-    gacha_btn_pos: document.getElementById('add_res_gacha').value,
-    skip_btn_pos: document.getElementById('add_res_skip').value,
-    confirm_btn_pos: document.getElementById('add_res_confirm').value,
-    result_roi: document.getElementById('add_res_roi').value,
-    screenshot_roi: document.getElementById('add_res_ss_roi').value,
+    width: w,
+    height: h,
+    dpi: dpi || 240,
+    name: name,
+    gacha_btn_pos:
+      document.getElementById('add_res_gacha')?.value?.trim() || '{}',
+    skip_btn_pos:
+      document.getElementById('add_res_skip')?.value?.trim() || '{}',
+    confirm_btn_pos:
+      document.getElementById('add_res_confirm')?.value?.trim() || '{}',
+    result_roi: document.getElementById('add_res_roi')?.value?.trim() || '{}',
+    screenshot_roi:
+      document.getElementById('add_res_ss_roi')?.value?.trim() || '{}',
   };
+
   try {
     const res = await fetch('/api/db/resolutions', {
       method: 'POST',
@@ -775,28 +805,56 @@ async function saveResolutionRecord() {
     });
     const result = await res.json();
     if (result.status === 'success') {
-      await fetchDbData();
-      resetResolutionForm();
+      try {
+        await fetchDbData();
+        resetResolutionForm();
+      } catch (uiErr) {
+        console.warn('UI 폼 갱신 중 경고:', uiErr);
+      }
       addLog(result.message, 'info');
+      showMessage(result.message, false);
     } else {
       alert(`저장 실패: ${result.message}`);
+      addLog(`해상도 저장 실패: ${result.message}`, 'error');
+      showMessage(result.message, true);
     }
   } catch (err) {
-    addLog('해상도 저장 중 오류 발생', 'error');
+    console.error('해상도 저장 통신 에러:', err);
+    addLog(`해상도 저장 통신 오류: ${err.message || err}`, 'error');
   }
 }
 
+// 템플릿 inline onsubmit 및 전역 호출용 별칭 등록
+const addResolutionRecord = saveResolutionRecord;
+window.addResolutionRecord = saveResolutionRecord;
+window.saveResolutionRecord = saveResolutionRecord;
+
 async function deleteResolutionRecord(w, h, dpi) {
   if (!confirm(`${w}x${h} (${dpi}DPI) 해상도를 삭제하시겠습니까?`)) return;
-  const res = await fetch('/api/db/resolutions/delete', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ width: w, height: h, dpi: dpi }),
-  });
-  const result = await res.json();
-  if (result.status === 'success') {
-    await fetchDbData();
-    addLog('해상도 데이터가 삭제되었습니다.', 'system');
+  try {
+    const res = await fetch('/api/db/resolutions/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        width: Number(w),
+        height: Number(h),
+        dpi: Number(dpi),
+      }),
+    });
+    const result = await res.json();
+    if (result.status === 'success') {
+      try {
+        await fetchDbData();
+      } catch (uiErr) {}
+      addLog(result.message, 'system');
+      showMessage(result.message, false);
+    } else {
+      alert(`삭제 실패: ${result.message}`);
+      addLog(`해상도 삭제 실패: ${result.message}`, 'error');
+    }
+  } catch (err) {
+    console.error('해상도 삭제 통신 에러:', err);
+    addLog(`해상도 삭제 통신 오류: ${err.message || err}`, 'error');
   }
 }
 
@@ -967,14 +1025,15 @@ async function loadUnrecognizedImages() {
 
         itemDiv.innerHTML = `
           <img src="/static/unrecognized/${filename}" alt="미인식 이미지" style="width: 70px; height: 140px; object-fit: contain; background: #000; border-radius: 4px;">
-          <div style="flex: 1; display: flex; gap: 10px; align-items: center;">
-            <input type="text" id="char_${filename}" placeholder="캐릭터명 (예: 라텔)" style="flex: 1; padding: 8px;">
-            <input type="text" id="costume_name_${filename}" placeholder="코스튬명 (예: 풀_파티)" style="flex: 1; padding: 8px;">
+          <div style="flex: 1; display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+            <input type="text" id="char_${filename}" placeholder="캐릭터명 (예: 라텔)" style="flex: 1; min-width: 120px; padding: 8px;" oninput="onUnrecognizedNameInput('${filename}')">
+            <input type="text" id="costume_name_${filename}" placeholder="코스튬명 (예: 풀_파티)" style="flex: 1; min-width: 140px; padding: 8px;" oninput="onUnrecognizedNameInput('${filename}')">
             <select id="rarity_${filename}" style="width: 80px; padding: 8px;">
               <option value="5">5성</option>
               <option value="4">4성</option>
               <option value="3">3성</option>
             </select>
+            <span id="hint_${filename}" style="font-size: 12px; min-width: 90px;"></span>
             <div style="display: flex; gap: 5px;">
               <button type="button" class="btn-db-add" onclick="registerUnrecognized('${filename}')">DB 등록</button>
               <button type="button" class="danger-btn" style="padding: 0 15px;" onclick="deleteUnrecognized('${filename}')">삭제</button>
@@ -1011,6 +1070,39 @@ async function deleteUnrecognized(filename) {
     }
   } catch (err) {
     alert('서버 통신 중 오류가 발생했습니다.');
+  }
+}
+
+// 미인식 이미지 캐릭터/코스튬명 입력 시 기존 DB 등록 여부 실시간 확인 및 기존 성급 자동 반영
+function onUnrecognizedNameInput(filename) {
+  const charVal = (
+    document.getElementById(`char_${filename}`)?.value || ''
+  ).trim();
+  const costVal = (
+    document.getElementById(`costume_name_${filename}`)?.value || ''
+  ).trim();
+  const raritySelect = document.getElementById(`rarity_${filename}`);
+  const hintSpan = document.getElementById(`hint_${filename}`);
+  if (!raritySelect) return;
+
+  if (charVal && costVal && Array.isArray(dbData.costumes)) {
+    const fullName = `${charVal}_${costVal}`;
+    const matched = dbData.costumes.find(
+      (c) => c.costume_name === fullName || c.full_name === fullName,
+    );
+    if (matched) {
+      raritySelect.value = String(matched.rarity);
+      raritySelect.disabled = true; // 기존 코스튬 성급 변경 방지
+      if (hintSpan) {
+        hintSpan.innerText = `(기존 ${matched.rarity}성 유지)`;
+        hintSpan.style.color = '#4CAF50';
+      }
+      return;
+    }
+  }
+  raritySelect.disabled = false;
+  if (hintSpan) {
+    hintSpan.innerText = '';
   }
 }
 

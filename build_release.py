@@ -75,6 +75,7 @@ def build():
 
                 with open(src, "r", encoding="utf-8") as f:
                     cfg = yaml.safe_load(f) or {}
+                cfg["adb_device"] = ""
                 cfg["target_costumes"] = []
                 cfg["discord"] = {
                     "enabled": False,

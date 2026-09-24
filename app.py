@@ -27,6 +27,12 @@ if hasattr(sys, "_MEIPASS"):
 else:
     base_dir = os.path.dirname(os.path.abspath(__file__))
 
+# 작업 디렉토리를 항상 base_dir로 고정 (상대 경로 참조 안전성 보장)
+try:
+    os.chdir(base_dir)
+except Exception:
+    pass
+
 template_dir = os.path.join(base_dir, "template")
 static_dir = os.path.join(base_dir, "static")
 app = Flask(__name__, template_folder=template_dir, static_folder=static_dir)
@@ -43,14 +49,105 @@ for directory in [BACKUP_DIR, COSTUMES_DIR, UNRECOGNIZED_DIR]:
     if not os.path.exists(directory):
         os.makedirs(directory)
 
-tesseract_dir = os.path.join(base_dir, "Tesseract-OCR")
-pytesseract.pytesseract.tesseract_cmd = os.path.join(tesseract_dir, "tesseract.exe")
-os.environ["TESSDATA_PREFIX"] = os.path.join(tesseract_dir, "tessdata")
+
+def is_ascii_str(s):
+    try:
+        s.encode("ascii")
+        return True
+    except (UnicodeEncodeError, AttributeError):
+        return False
+
+
+def init_tesseract(app_dir):
+    """
+    Tesseract 5.x는 Windows에서 실행 경로 또는 TESSDATA_PREFIX에
+    한글 등 비ASCII 문자가 포함되어 있으면 std::filesystem 예외
+    ('Cannot convert character sequence: Illegal byte sequence')를 발생시킵니다.
+    따라서 실행 경로에 한글이 포함된 경우, 모든 Windows에서 보장되는 안전한 영문 전용 디렉토리
+    (C:\ProgramData\BD2Controller\Tesseract-OCR)로 엔진 및 언어팩을 미러링하여 사용합니다.
+    """
+    local_tess_dir = os.path.join(app_dir, "Tesseract-OCR")
+    local_tess_exe = os.path.join(local_tess_dir, "tesseract.exe")
+    local_tessdata = os.path.join(local_tess_dir, "tessdata")
+
+    # 1. 실행 경로가 순수 영문(ASCII)이고 로컬에 tesseract.exe가 있는 경우 그대로 사용
+    if is_ascii_str(app_dir) and os.path.exists(local_tess_exe):
+        pytesseract.pytesseract.tesseract_cmd = local_tess_exe
+        os.environ["TESSDATA_PREFIX"] = local_tessdata
+        return local_tess_exe, local_tessdata
+
+    # 2. 한글/특수문자가 포함된 경로인 경우: 영문 전용 안전 디렉토리 탐색
+    candidate_roots = [
+        os.environ.get("ProgramData", "C:\\ProgramData"),
+        os.environ.get("PUBLIC", "C:\\Users\\Public"),
+    ]
+    safe_root = None
+    for cand in candidate_roots:
+        if cand and is_ascii_str(cand) and os.path.exists(cand):
+            safe_root = cand
+            break
+
+    if not safe_root:
+        safe_root = "C:\\ProgramData"
+
+    safe_tess_dir = os.path.join(safe_root, "BD2Controller", "Tesseract-OCR")
+    safe_tessdata = os.path.join(safe_tess_dir, "tessdata")
+    safe_tess_exe = os.path.join(safe_tess_dir, "tesseract.exe")
+
+    try:
+        os.makedirs(safe_tessdata, exist_ok=True)
+        if os.path.exists(local_tess_dir):
+            for item in os.listdir(local_tess_dir):
+                s = os.path.join(local_tess_dir, item)
+                d = os.path.join(safe_tess_dir, item)
+                if os.path.isdir(s):
+                    if not os.path.exists(d):
+                        shutil.copytree(s, d)
+                else:
+                    if not os.path.exists(d) or os.path.getsize(s) != os.path.getsize(
+                        d
+                    ):
+                        shutil.copy2(s, d)
+
+        if os.path.exists(safe_tess_exe):
+            pytesseract.pytesseract.tesseract_cmd = safe_tess_exe
+            os.environ["TESSDATA_PREFIX"] = safe_tessdata
+            return safe_tess_exe, safe_tessdata
+    except Exception as e:
+        safe_print(f"[경고] Tesseract 안전 경로 복사 실패: {e}")
+
+    # Fallback
+    pytesseract.pytesseract.tesseract_cmd = local_tess_exe
+    os.environ["TESSDATA_PREFIX"] = local_tessdata
+    return local_tess_exe, local_tessdata
+
+
+# Tesseract 안전 초기화 실행
+TESS_EXE_PATH, TESS_DATA_PATH = init_tesseract(base_dir)
 
 adb_path = os.path.join(base_dir, "adb.exe")
+ADB_EXEC = adb_path if os.path.exists(adb_path) else "adb"
 ADB_BIN = f'"{adb_path}"' if os.path.exists(adb_path) else "adb"
 if base_dir not in os.environ.get("PATH", ""):
     os.environ["PATH"] = base_dir + os.pathsep + os.environ.get("PATH", "")
+
+
+def run_adb_cmd(args, timeout=10, check=False):
+    """
+    ADB 명령어를 cmd.exe(shell=True)를 거치지 않고 직접 리스트로 실행하여
+    따옴표 깨짐 및 한글/공백 경로 문제를 원천 방지합니다.
+    """
+    cmd = [ADB_EXEC] + [str(a) for a in args]
+    return subprocess.run(
+        cmd,
+        shell=False,
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=timeout,
+        check=check,
+    )
+
 
 OCR_TEST_LOG_PATH = os.path.join(base_dir, "ocr_test.log")
 
@@ -424,35 +521,83 @@ def get_all_costumes_from_db():
     return costumes
 
 
+_TEMPLATE_CACHE = {}
+
+
+def clear_template_cache():
+    """템플릿 이미지 캐시 초기화"""
+    global _TEMPLATE_CACHE
+    _TEMPLATE_CACHE.clear()
+
+
+def get_template_image(img_path, target_shape=None):
+    """
+    템플릿 이미지를 메모리에 캐싱하여 디스크 I/O 반복을 방지합니다.
+    target_shape: (height, width)
+    """
+    global _TEMPLATE_CACHE
+    if not img_path:
+        return None
+    if not os.path.isabs(img_path):
+        img_path = os.path.join(base_dir, img_path)
+    if not os.path.exists(img_path):
+        return None
+
+    cache_key = (img_path, target_shape)
+    if cache_key in _TEMPLATE_CACHE:
+        return _TEMPLATE_CACHE[cache_key]
+
+    template = imread_utf8(img_path, cv2.IMREAD_COLOR)
+    if template is not None and target_shape is not None:
+        if template.shape[:2] != target_shape:
+            template = cv2.resize(template, (target_shape[1], target_shape[0]))
+
+    if template is not None:
+        _TEMPLATE_CACHE[cache_key] = template
+
+    return template
+
+
 def match_costume_from_db(card_crop, db_costumes, threshold=0.80):
-    if card_crop.shape[2] == 4:
+    if card_crop is None or card_crop.size == 0:
+        return None
+    if card_crop.shape[0] < 10 or card_crop.shape[1] < 10:
+        return None
+
+    if len(card_crop.shape) == 3 and card_crop.shape[2] == 4:
         card_crop = cv2.cvtColor(card_crop, cv2.COLOR_BGRA2BGR)
 
+    # 1. 단색 / 암전 / 로딩 화면 등 유효하지 않은 슬롯 예외 처리 (표준편차 체크)
+    crop_std = float(np.std(card_crop))
+    if crop_std < 10.0:
+        debug_log(
+            f"슬롯 이미지 분산 부족 (std: {crop_std:.2f} < 10.0) - 빈 화면 또는 암전으로 판정하여 매칭 제외"
+        )
+        return None
+
+    target_shape = card_crop.shape[:2]
     best_match_name = None
-    best_max_val = 0.0
+    best_max_val = -1.0
 
     for costume in db_costumes:
         img_path = costume.get("image_filename") or costume.get("image_path")
-        if img_path and os.path.exists(img_path):
-            template = imread_utf8(img_path, cv2.IMREAD_COLOR)
-            if template is not None:
-                if template.shape[:2] != card_crop.shape[:2]:
-                    template = cv2.resize(
-                        template, (card_crop.shape[1], card_crop.shape[0])
-                    )
-                res = cv2.matchTemplate(card_crop, template, cv2.TM_CCOEFF_NORMED)
-                _, max_val, _, _ = cv2.minMaxLoc(res)
+        template = get_template_image(img_path, target_shape=target_shape)
+        if template is None or float(np.std(template)) < 10.0:
+            continue
 
-                if max_val > best_max_val:
-                    best_max_val = max_val
-                    best_match_name = costume.get("costume_name", "")
+        res = cv2.matchTemplate(card_crop, template, cv2.TM_CCOEFF_NORMED)
+        _, max_val, _, _ = cv2.minMaxLoc(res)
 
-                # 전역 threshold 사용
-                if max_val >= threshold:
-                    debug_log(
-                        f"템플릿 매칭 성공: {costume.get('costume_name')} (Score: {max_val:.4f} >= {threshold})"
-                    )
-                    return costume.get("costume_name", "")
+        if max_val > best_max_val:
+            best_max_val = max_val
+            best_match_name = costume.get("costume_name", "")
+
+    # 전체 DB 탐색 후, 최고 유사도가 임계값 이상인 경우에만 최종 매칭 인정 (Best-Match 방식)
+    if best_max_val >= threshold and best_match_name:
+        debug_log(
+            f"템플릿 매칭 성공: {best_match_name} (최고 Score: {best_max_val:.4f} >= {threshold})"
+        )
+        return best_match_name
 
     if best_match_name:
         debug_log(
@@ -534,14 +679,7 @@ def get_target_device_id(config=None):
 def get_connected_devices():
     """adb devices -l 출력을 파싱하여 연결된 기기 목록 반환"""
     try:
-        res = subprocess.run(
-            f"{ADB_BIN} devices -l",
-            shell=True,
-            capture_output=True,
-            text=True,
-            errors="replace",
-            timeout=5,
-        )
+        res = run_adb_cmd(["devices", "-l"], timeout=5)
         lines = (res.stdout or "").splitlines()
         devices = []
         for line in lines:
@@ -592,25 +730,11 @@ def check_and_connect_adb(device_id):
         is_network = ":" in device_id or device_id.startswith("127.0.0.1")
         if is_network:
             debug_log(f"네트워크 ADB 연결 시도: {device_id}")
-            subprocess.run(
-                f"{ADB_BIN} connect {device_id}",
-                shell=True,
-                capture_output=True,
-                text=True,
-                errors="replace",
-                timeout=10,
-            )
+            run_adb_cmd(["connect", device_id], timeout=10)
         else:
             debug_log(f"USB/시리얼 기기 상태 확인: {device_id}")
 
-        devices_result = subprocess.run(
-            f"{ADB_BIN} devices -l",
-            shell=True,
-            capture_output=True,
-            text=True,
-            errors="replace",
-            timeout=5,
-        )
+        devices_result = run_adb_cmd(["devices", "-l"], timeout=5)
         stdout = devices_result.stdout or ""
 
         for line in stdout.splitlines():
@@ -645,14 +769,7 @@ def check_and_connect_adb(device_id):
 def get_device_resolution(device_id):
     """선택된 기기의 물리 해상도 및 현재 적용된 해상도(Override size) 조회"""
     try:
-        res = subprocess.run(
-            f"{ADB_BIN} -s {device_id} shell wm size",
-            shell=True,
-            capture_output=True,
-            text=True,
-            errors="replace",
-            timeout=5,
-        )
+        res = run_adb_cmd(["-s", device_id, "shell", "wm", "size"], timeout=5)
         stdout = res.stdout or ""
         physical = ""
         override = ""
@@ -668,24 +785,156 @@ def get_device_resolution(device_id):
         return "", ""
 
 
+def is_emulator_device(device_id):
+    """지정된 ADB 장치가 앱플레이어(에뮬레이터)인지 판별"""
+    if not device_id:
+        return False
+    dev_str = device_id.lower()
+    # 1. IP:포트, localhost, emulator- 접두사 확인
+    if any(dev_str.startswith(p) for p in ["127.0.0.1:", "localhost:", "emulator-"]):
+        return True
+
+    # 2. get_connected_devices() 목록 확인
+    try:
+        devices = get_connected_devices()
+        for d in devices:
+            if d.get("id") == device_id:
+                m = (d.get("model") or "").lower()
+                p = (d.get("product") or "").lower()
+                t = d.get("type", "")
+                if t == "network" or any(
+                    emu in m or emu in p
+                    for emu in [
+                        "emulator",
+                        "nox",
+                        "bluestacks",
+                        "ldplayer",
+                        "mumu",
+                        "vbox",
+                        "bignox",
+                    ]
+                ):
+                    return True
+    except Exception:
+        pass
+
+    # 3. getprop 질의
+    try:
+        res = run_adb_cmd(
+            ["-s", device_id, "shell", "getprop", "ro.product.model"], timeout=2
+        )
+        model = (res.stdout or "").strip().lower()
+        if any(
+            emu in model
+            for emu in ["emulator", "nox", "bluestacks", "ldplayer", "mumu", "vbox"]
+        ):
+            return True
+        res_hw = run_adb_cmd(
+            ["-s", device_id, "shell", "getprop", "ro.hardware"], timeout=2
+        )
+        hw = (res_hw.stdout or "").strip().lower()
+        if any(emu in hw for emu in ["vbox", "nox", "ttvm", "goldfish", "ranchu"]):
+            return True
+    except Exception:
+        pass
+
+    return False
+
+
+def get_configured_resolution():
+    """현재 config.yaml에 설정된 해상도 정보(width, height, name) 반환"""
+    config = load_config()
+    selected_name = config.get("resolution")
+    if not selected_name:
+        return 1920, 1080, "FHD (1920x1080 - 280DPI)"
+    try:
+        conn = get_db_connection()
+        row = conn.execute(
+            "SELECT width, height, name FROM resolutions WHERE name = ?",
+            (selected_name,),
+        ).fetchone()
+        conn.close()
+        if row:
+            return int(row["width"]), int(row["height"]), row["name"]
+    except Exception:
+        pass
+    return 1920, 1080, selected_name
+
+
+def check_resolution_match(device_id):
+    """
+    현재 연결된 기기/앱플레이어의 해상도가 설정된 해상도와 일치하는지 종합 검증
+    """
+    target_w, target_h, target_name = get_configured_resolution()
+    is_emu = is_emulator_device(device_id)
+
+    physical, override = get_device_resolution(device_id)
+    cur_res_str = override if override else physical
+
+    if not cur_res_str or "x" not in cur_res_str:
+        return {
+            "matched": False,
+            "device_res": "미확인",
+            "physical_size": physical,
+            "override_size": override,
+            "target_res": f"{target_w}x{target_h}",
+            "is_emulator": is_emu,
+            "is_portrait": False,
+            "message": "기기 해상도를 조회할 수 없습니다.",
+        }
+
+    try:
+        parts = cur_res_str.lower().split("x")
+        cur_w, cur_h = int(parts[0].strip()), int(parts[1].strip())
+    except Exception:
+        return {
+            "matched": False,
+            "device_res": cur_res_str,
+            "physical_size": physical,
+            "override_size": override,
+            "target_res": f"{target_w}x{target_h}",
+            "is_emulator": is_emu,
+            "is_portrait": False,
+            "message": f"해상도 파싱 오류 ({cur_res_str})",
+        }
+
+    # 1920x1080 또는 1080x1920 등 가로/세로 매칭 검사
+    matched = sorted([cur_w, cur_h]) == sorted([target_w, target_h])
+    is_portrait = cur_w < cur_h
+
+    if matched:
+        if is_portrait:
+            msg = f"해상도 규격 일치 ({cur_w}x{cur_h} ↔ {target_w}x{target_h}) ✅ (세로 모드 감지)"
+        else:
+            msg = f"해상도 일치 ({cur_w}x{cur_h}) ✅"
+    else:
+        if is_emu:
+            msg = f"앱플레이어 해상도 불일치: 현재 {cur_w}x{cur_h} (설정: {target_w}x{target_h}) ⚠️"
+        else:
+            msg = f"기기 해상도 불일치: 현재 {cur_w}x{cur_h} (설정: {target_w}x{target_h})"
+
+    return {
+        "matched": matched,
+        "device_res": cur_res_str,
+        "physical_size": physical,
+        "override_size": override,
+        "target_res": f"{target_w}x{target_h}",
+        "is_emulator": is_emu,
+        "is_portrait": is_portrait,
+        "message": msg,
+    }
+
+
 def set_device_resolution(device_id, width, height, density=None):
     """기기 해상도 및 DPI 임시 변경 (선택사항)"""
     try:
-        subprocess.run(
-            f"{ADB_BIN} -s {device_id} shell wm size {width}x{height}",
-            shell=True,
-            capture_output=True,
-            text=True,
-            errors="replace",
+        run_adb_cmd(
+            ["-s", device_id, "shell", "wm", "size", f"{width}x{height}"],
             timeout=5,
         )
         if density:
-            subprocess.run(
-                f"{ADB_BIN} -s {device_id} shell wm density {density}",
-                shell=True,
-                capture_output=True,
-                text=True,
-                errors="replace",
+            run_adb_cmd(
+                ["-s", device_id, "shell", "wm", "density", str(density)],
                 timeout=5,
             )
         return True
@@ -697,22 +946,8 @@ def set_device_resolution(device_id, width, height, density=None):
 def reset_device_resolution(device_id):
     """기기 해상도 및 DPI 원래대로 복구"""
     try:
-        subprocess.run(
-            f"{ADB_BIN} -s {device_id} shell wm size reset",
-            shell=True,
-            capture_output=True,
-            text=True,
-            errors="replace",
-            timeout=5,
-        )
-        subprocess.run(
-            f"{ADB_BIN} -s {device_id} shell wm density reset",
-            shell=True,
-            capture_output=True,
-            text=True,
-            errors="replace",
-            timeout=5,
-        )
+        run_adb_cmd(["-s", device_id, "shell", "wm", "size", "reset"], timeout=5)
+        run_adb_cmd(["-s", device_id, "shell", "wm", "density", "reset"], timeout=5)
         return True
     except Exception as e:
         debug_log(f"해상도 복구 실패: {e}")
@@ -722,33 +957,23 @@ def reset_device_resolution(device_id):
 def capture_adb_screenshot(device_id):
     try:
         debug_log("ADB 스크린샷 캡처 요청 중...")
-        cmd_cap = f"{ADB_BIN} -s {device_id} shell screencap -p /sdcard/screenshot.png"
-        subprocess.run(
-            cmd_cap,
-            shell=True,
-            capture_output=True,
-            text=True,
-            errors="replace",
-            check=True,
+        run_adb_cmd(
+            ["-s", device_id, "shell", "screencap", "-p", "/sdcard/screenshot.png"],
             timeout=10,
+            check=True,
         )
 
         local_path = os.path.join(base_dir, "screenshot.png")
-        cmd_pull = (
-            f'{ADB_BIN} -s {device_id} pull /sdcard/screenshot.png "{local_path}"'
-        )
-        subprocess.run(
-            cmd_pull,
-            shell=True,
-            capture_output=True,
-            text=True,
-            errors="replace",
-            check=True,
+        # pull 시 list 인자로 실행하여 한글/공백 경로 및 따옴표 문제 방지
+        run_adb_cmd(
+            ["-s", device_id, "pull", "/sdcard/screenshot.png", local_path],
             timeout=10,
+            check=True,
         )
 
-        cmd_rm = f"{ADB_BIN} -s {device_id} shell rm /sdcard/screenshot.png"
-        subprocess.run(cmd_rm, shell=True, capture_output=True, text=True, timeout=5)
+        run_adb_cmd(
+            ["-s", device_id, "shell", "rm", "/sdcard/screenshot.png"], timeout=5
+        )
 
         return local_path if os.path.exists(local_path) else None
     except Exception as e:
@@ -756,17 +981,29 @@ def capture_adb_screenshot(device_id):
         return None
 
 
-def execute_adb_click(device_id, x, y):
-    debug_log(f"ADB 터치 이벤트 전송 -> x:{int(x)}, y:{int(y)}")
-    cmd = f"{ADB_BIN} -s {device_id} shell input tap {int(x)} {int(y)}"
-    subprocess.run(
-        cmd,
-        shell=True,
-        capture_output=True,
-        text=True,
-        errors="replace",
-        timeout=10,
-    )
+def execute_adb_click(device_id, x, y, duration_ms=50):
+    debug_log(f"ADB 터치 이벤트 전송 -> x:{int(x)}, y:{int(y)} ({duration_ms}ms)")
+    if duration_ms and duration_ms > 0:
+        run_adb_cmd(
+            [
+                "-s",
+                device_id,
+                "shell",
+                "input",
+                "swipe",
+                str(int(x)),
+                str(int(y)),
+                str(int(x)),
+                str(int(y)),
+                str(int(duration_ms)),
+            ],
+            timeout=10,
+        )
+    else:
+        run_adb_cmd(
+            ["-s", device_id, "shell", "input", "tap", str(int(x)), str(int(y))],
+            timeout=10,
+        )
 
 
 def perform_slot_ocr(
@@ -795,7 +1032,7 @@ def perform_slot_ocr(
             result["error_msg"] = "스크린샷 캡처 실패"
             return result
 
-        detail_img = cv2.imread(detail_ss)
+        detail_img = imread_utf8(detail_ss)
         if detail_img is None:
             result["error_msg"] = "상세 이미지 로드 실패"
             return result
@@ -868,6 +1105,215 @@ def perform_slot_ocr(
     return result
 
 
+def is_retry_button_present(image, gacha_pos, template=None):
+    """
+    현재 화면에서 '다시 뽑기' 버튼이 출현했는지 여부를 신속하고 정확하게 판별합니다.
+    브라운더스트2의 '다시 뽑기' 버튼 특유의 선명한 하늘색(Cyan/Sky-Blue) 색상 비율 및
+    템플릿 매칭 점수를 종합하여 밀리초 단위로 정확하게 감지합니다.
+    """
+    if image is None or not gacha_pos:
+        return False
+    gx = gacha_pos.get("x")
+    gy = gacha_pos.get("y")
+    if gx is None or gy is None:
+        return False
+    gx, gy = int(gx), int(gy)
+    h, w = image.shape[:2]
+    if not (0 <= gx < w and 0 <= gy < h):
+        return False
+
+    # 기준 해상도(1920) 대비 가로폭 스케일 비율
+    scale = w / 1920.0 if w > 0 else 1.0
+    dx = int(min(150 * scale, gx, w - gx))
+    dy = int(min(50 * scale, gy, h - gy))
+    if dx < 10 or dy < 5:
+        return False
+
+    crop = image[gy - dy : gy + dy, gx - dx : gx + dx]
+    if crop.size == 0:
+        return False
+
+    # 1. 하늘색(Cyan/Sky-Blue) 색상 비율 검사 (HSV: H=90~115, S=80~255, V=150~255)
+    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+    lower_blue = np.array([90, 80, 150])
+    upper_blue = np.array([115, 255, 255])
+    mask = cv2.inRange(hsv, lower_blue, upper_blue)
+    blue_ratio = np.count_nonzero(mask) / mask.size
+
+    # 2. 템플릿 매칭 검사
+    tmpl_match = False
+    if template is not None:
+        try:
+            th, tw = template.shape[:2]
+            if scale != 1.0:
+                scaled_tmpl = cv2.resize(
+                    template,
+                    (max(10, int(tw * scale)), max(5, int(th * scale))),
+                )
+            else:
+                scaled_tmpl = template
+            if (
+                crop.shape[0] >= scaled_tmpl.shape[0]
+                and crop.shape[1] >= scaled_tmpl.shape[1]
+            ):
+                res = cv2.matchTemplate(crop, scaled_tmpl, cv2.TM_CCOEFF_NORMED)
+                _, max_val, _, _ = cv2.minMaxLoc(res)
+                if max_val >= 0.70:
+                    tmpl_match = True
+        except Exception:
+            pass
+
+    # 템플릿이 로드된 경우: 템플릿 매칭(>= 0.70)과 하늘색 비율(>= 0.30)을 동시 만족해야만 인정 (오탐 원천 차단)
+    if template is not None:
+        return tmpl_match and (blue_ratio >= 0.30)
+
+    # 템플릿이 없는 경우: 하늘색 비율 기준 판별
+    return blue_ratio >= 0.40
+
+
+def wait_for_retry_button_with_skip_tapping(
+    device_id, skip_btn, gacha_btn, res_data, max_timeout=20.0
+):
+    """
+    뽑기 진행 후 결과 화면('다시 뽑기' 버튼)이 나타날 때까지
+    스킵 버튼을 0.1초 간격으로 연속 클릭하며 대기합니다.
+    신규 코스튬 획득 안내 팝업 등 추가 스킵이 필요한 상황을 전자동으로 처리합니다.
+    """
+    global is_macro_running
+
+    skip_x = skip_btn.get("x")
+    skip_y = skip_btn.get("y")
+    target_w = int(res_data.get("width", 1920))
+    target_h = int(res_data.get("height", 1080))
+
+    # 템플릿 이미지 로드
+    retry_template_path = os.path.join(base_dir, "static", "retry_btn.png")
+    retry_template = None
+    if os.path.exists(retry_template_path):
+        retry_template = imread_utf8(retry_template_path)
+
+    stop_tapping = threading.Event()
+    tap_count = [0]
+
+    def _tap_worker():
+        while not stop_tapping.is_set() and is_macro_running:
+            if skip_x is not None and skip_y is not None:
+                t_start = time.time()
+                try:
+                    # input tap(0ms) 대신 50ms 홀드 스와이프를 사용하여 유니티 게임 엔진의 터치 드랍(미인식) 원천 해결
+                    run_adb_cmd(
+                        [
+                            "-s",
+                            device_id,
+                            "shell",
+                            "input",
+                            "swipe",
+                            str(int(skip_x)),
+                            str(int(skip_y)),
+                            str(int(skip_x)),
+                            str(int(skip_y)),
+                            "50",
+                        ],
+                        timeout=3,
+                    )
+                    tap_count[0] += 1
+                except Exception as e:
+                    debug_log(f"스킵 탭 에러: {e}")
+
+                elapsed_tap = time.time() - t_start
+                remain = max(0.01, 0.1 - elapsed_tap)
+                if stop_tapping.wait(remain):
+                    break
+            else:
+                if stop_tapping.wait(0.1):
+                    break
+
+    tap_thread = None
+    if skip_x is not None and skip_y is not None:
+        macro_log(
+            f"⏩ [스킵 연타 시작] 결과 화면이 나올 때까지 스킵 버튼(x:{skip_x}, y:{skip_y})을 0.1초마다 반복 클릭합니다..."
+        )
+        tap_thread = threading.Thread(target=_tap_worker, daemon=True)
+        tap_thread.start()
+
+    start_time = time.time()
+    last_screenshot_file = None
+    last_src_img = None
+    detected = False
+
+    # 1단계: 가챠 시작 후 화면 전환 최소 대기 (2.0초)
+    # 서버 응답 및 컷신 시작 전 이전 화면의 '다시 뽑기' 버튼으로 인한 조기 종료를 원천 방지
+    # 이 2초 동안에도 백그라운드 스레드는 스킵 버튼을 0.1초마다 연타(~20회)합니다.
+    min_anim_wait = 2.0
+    while is_macro_running and (time.time() - start_time < min_anim_wait):
+        time.sleep(0.5)
+        if tap_count[0] > 0 and tap_count[0] % 10 == 0:
+            macro_log(
+                f"⏩ [스킵 연타 중] 가챠 연출 스킵 진행 중... ({tap_count[0]}회 클릭)"
+            )
+
+    # 2단계: 결과 화면('다시 뽑기' 버튼) 출현 대기
+    try:
+        last_log_tap = tap_count[0]
+        while is_macro_running and (time.time() - start_time < max_timeout):
+            ss_file = capture_adb_screenshot(device_id)
+            if not ss_file or not os.path.exists(ss_file):
+                time.sleep(0.2)
+                continue
+
+            img = imread_utf8(ss_file)
+            if img is None:
+                time.sleep(0.2)
+                continue
+
+            last_screenshot_file = ss_file
+
+            # 화면 암전(로딩 중)인 경우 잠시 대기
+            if float(np.mean(img)) < 15.0:
+                time.sleep(0.3)
+                continue
+
+            # 해상도 보정
+            if img.shape[1] != target_w or img.shape[0] != target_h:
+                eval_img = cv2.resize(img, (target_w, target_h))
+            else:
+                eval_img = img
+
+            last_src_img = eval_img
+
+            # '다시 뽑기' 버튼 출현 여부 판별
+            if is_retry_button_present(eval_img, gacha_btn, retry_template):
+                detected = True
+                break
+
+            # 10회 이상 추가 탭 될 때마다 진행 상황 로그 출력
+            if tap_count[0] - last_log_tap >= 10:
+                macro_log(
+                    f"⏩ [스킵 연타 중] 신규 코스튬 팝업/연출 스킵 대기 중... ({tap_count[0]}회 클릭)"
+                )
+                last_log_tap = tap_count[0]
+
+            time.sleep(0.2)
+
+    finally:
+        # 결과 화면 감지 완료 또는 타임아웃/중단 시 스킵 터치 스레드 즉시 종료
+        stop_tapping.set()
+        if tap_thread and tap_thread.is_alive():
+            tap_thread.join(timeout=1.0)
+
+    elapsed = time.time() - start_time
+    if detected:
+        macro_log(
+            f"✅ [결과 화면 감지 완료] '다시 뽑기' 버튼 출현 확인 (총 스킵 연타 {tap_count[0]}회, {elapsed:.1f}초)"
+        )
+    else:
+        macro_log(
+            f"⚠️ [결과 화면 감지 시간 초과] {max_timeout}초 동안 '다시 뽑기' 버튼이 감지되지 않아 현재 화면으로 계속 진행합니다."
+        )
+
+    return detected, last_screenshot_file, last_src_img
+
+
 # ==============================================================================
 # 5. 매크로 메인 루프
 # ==============================================================================
@@ -889,6 +1335,37 @@ def run_gacha_macro_loop():
         return
 
     macro_log(f"✅ [ADB 연결 성공] {device_id} 정상 연결 확인됨.")
+
+    # 해상도 일치 여부 검증
+    res_check = check_resolution_match(device_id)
+    target_w, target_h, target_name = get_configured_resolution()
+
+    if res_check["is_emulator"]:
+        if res_check["matched"]:
+            macro_log(
+                f"🖥️ [앱플레이어 감지] 해상도 일치 확인됨: {res_check['device_res']} == {target_w}x{target_h} ✅"
+            )
+        else:
+            macro_log(
+                f"⚠️ [앱플레이어 해상도 불일치] 현재 앱플레이어 해상도({res_check['device_res']})가 매크로 설정({target_w}x{target_h})과 다릅니다!"
+            )
+            macro_log(
+                "💡 [권장] 원활한 카드 인식을 위해 앱플레이어 설정에서 해상도를 1920x1080 (16:9 가로 모드)으로 설정해주세요."
+            )
+    else:
+        # 스마트폰 / 모바일 기기
+        if res_check["matched"]:
+            macro_log(
+                f"📱 [모바일 기기] 해상도 일치 확인됨: {res_check['device_res']} ✅"
+            )
+        else:
+            macro_log(
+                f"📱 [모바일 기기 감지] 현재 기기 해상도: {res_check['device_res']} (설정: {target_w}x{target_h})"
+            )
+            if not options.get("auto_fhd_resolution", False):
+                macro_log(
+                    "💡 화면 비율(20:9 등)로 인해 인식이 어긋날 경우, 상단 '16:9 FHD 맞춤' 도구를 이용해주세요."
+                )
 
     # 선택적 해상도 자동 맞춤 (기본값: False)
     options = config.get("options", {})
@@ -952,14 +1429,24 @@ def run_gacha_macro_loop():
                 execute_adb_click(device_id, confirm_btn["x"], confirm_btn["y"])
                 time.sleep(click_delay)
 
-            if skip_btn.get("x") and skip_btn.get("y"):
-                execute_adb_click(device_id, skip_btn["x"], skip_btn["y"])
-                time.sleep(click_delay)
+            # 신규 코스튬 안내 팝업 등 추가 스킵 대응: '다시 뽑기' 버튼이 나타날 때까지 스킵 버튼을 0.1초마다 반복 클릭
+            macro_log(
+                "⏩ [스킵 진행] 결과 화면('다시 뽑기' 버튼)이 나타날 때까지 스킵 버튼을 연속 클릭합니다..."
+            )
+            detected, screenshot_file, src_img = (
+                wait_for_retry_button_with_skip_tapping(
+                    device_id, skip_btn, gacha_btn, res_data, max_timeout=15.0
+                )
+            )
 
-            time.sleep(2.0)
+            if not is_macro_running:
+                break
 
-            screenshot_file = capture_adb_screenshot(device_id)
-            if not screenshot_file or not os.path.exists(screenshot_file):
+            if (
+                not screenshot_file
+                or not os.path.exists(screenshot_file)
+                or src_img is None
+            ):
                 macro_log("[매크로 에러] ADB 스크린샷 실패 - 연결 상태 재확인 중...")
                 connected, re_msg = check_and_connect_adb(device_id)
                 if not connected:
@@ -967,11 +1454,36 @@ def run_gacha_macro_loop():
                 time.sleep(1.0)
                 continue
 
-            src_img = cv2.imread(screenshot_file)
-            if src_img is None:
-                print("[매크로 에러] 이미지 로드 실패")
+            # 화면 암전(로딩 중) 체크: 최대 3회 재캡처 시도
+            black_screen_retries = 0
+            while (
+                is_macro_running
+                and float(np.mean(src_img)) < 15.0
+                and black_screen_retries < 3
+            ):
+                black_screen_retries += 1
+                macro_log(
+                    f"[매크로] 화면 로딩 중(암전 상태) 감지 ({black_screen_retries}/3). 1초 대기 후 재캡처합니다..."
+                )
                 time.sleep(1.0)
-                continue
+                screenshot_file = capture_adb_screenshot(device_id)
+                if screenshot_file and os.path.exists(screenshot_file):
+                    new_img = imread_utf8(screenshot_file)
+                    if new_img is not None:
+                        src_img = new_img
+
+            target_w = int(res_data.get("width", 1920))
+            target_h = int(res_data.get("height", 1080))
+            if src_img.shape[1] < src_img.shape[0]:
+                macro_log(
+                    "⚠️ [주의] 기기가 세로 모드로 감지되었습니다. 정상 인식을 위해 가로 모드(1920x1080)로 설정해주세요."
+                )
+            elif src_img.shape[1] != target_w or src_img.shape[0] != target_h:
+                if loop_count == 1:
+                    macro_log(
+                        f"⚠️ [해상도 보정] 캡처 해상도({src_img.shape[1]}x{src_img.shape[0]})를 기준 해상도({target_w}x{target_h})에 맞춰 자동 보정합니다."
+                    )
+                src_img = cv2.resize(src_img, (target_w, target_h))
 
             result_roi_data = json.loads(res_data.get("result_roi") or "{}")
             card_size = result_roi_data.get("card_size", {"w": 110, "h": 230})
@@ -1141,6 +1653,7 @@ def run_gacha_macro_loop():
                         )
                         conn.close()
                         save_cv2_image_utf8(save_img_path, card_crop)
+                        clear_template_cache()
                     else:
                         save_cv2_image_utf8(save_img_path, card_crop)
                         try:
@@ -1150,6 +1663,7 @@ def run_gacha_macro_loop():
                                 (full_costume_name, 5, save_img_path),
                             )
                             conn.commit()
+                            clear_template_cache()
                             print(
                                 f"   [슬롯 {i+1}] DB 신규 저장 성공: {full_costume_name}"
                             )
@@ -1462,15 +1976,20 @@ def adb_get_device_resolution():
     try:
         config = load_config()
         device_id = get_target_device_id(config)
-        physical, override = get_device_resolution(device_id)
+        res_info = check_resolution_match(device_id)
         return jsonify(
             {
                 "status": "success",
                 "device_id": device_id,
-                "physical_size": physical,
-                "override_size": override,
-                "is_fhd": (override in ["1080x1920", "1920x1080"])
-                or (not override and physical in ["1080x1920", "1920x1080"]),
+                "physical_size": res_info["physical_size"],
+                "override_size": res_info["override_size"],
+                "current_size": res_info["device_res"],
+                "target_resolution": res_info["target_res"],
+                "is_emulator": res_info["is_emulator"],
+                "is_matched": res_info["matched"],
+                "is_portrait": res_info.get("is_portrait", False),
+                "message": res_info["message"],
+                "is_fhd": res_info["matched"],
             }
         )
     except Exception as e:
@@ -1561,11 +2080,8 @@ def adb_click():
 
         config = load_config()
         device_id = get_target_device_id(config)
-        subprocess.run(
-            f"{ADB_BIN} -s {device_id} shell input tap {int(x)} {int(y)}",
-            shell=True,
-            capture_output=True,
-            text=True,
+        run_adb_cmd(
+            ["-s", device_id, "shell", "input", "tap", str(int(x)), str(int(y))],
             timeout=10,
         )
         return jsonify({"status": "success", "message": f"좌표 ({x}, {y}) 클릭"})
@@ -1579,13 +2095,7 @@ def adb_disconnect():
         config = load_config()
         device_id = get_target_device_id(config)
         if ":" in device_id or device_id.startswith("127.0.0.1"):
-            result = subprocess.run(
-                f"{ADB_BIN} disconnect {device_id}",
-                shell=True,
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
+            result = run_adb_cmd(["disconnect", device_id], timeout=10)
             return jsonify(
                 {
                     "status": "success",
@@ -1630,27 +2140,79 @@ def get_db_data():
 def add_resolution():
     try:
         data = request.json
+        if not data:
+            return (
+                jsonify({"status": "error", "message": "데이터가 누락되었습니다."}),
+                400,
+            )
+
+        try:
+            w = int(data.get("width") or 0)
+            h = int(data.get("height") or 0)
+            dpi = int(data.get("dpi") or 0)
+        except (ValueError, TypeError):
+            return (
+                jsonify(
+                    {"status": "error", "message": "너비, 높이, DPI는 정수여야 합니다."}
+                ),
+                400,
+            )
+
+        name = str(data.get("name") or "").strip()
+        if not w or not h or not name:
+            return (
+                jsonify(
+                    {
+                        "status": "error",
+                        "message": "너비, 높이, 이름은 필수 입력 항목입니다.",
+                    }
+                ),
+                400,
+            )
+
         conn = get_db_connection()
+        # 기존 레코드 존재 여부 확인
+        existing = conn.execute(
+            "SELECT * FROM resolutions WHERE width = ? AND height = ? AND dpi = ?",
+            (w, h, dpi),
+        ).fetchone()
+
+        char_roi = data.get("character_name_roi")
+        costume_roi = data.get("costume_name_roi")
+        if existing:
+            if not char_roi:
+                char_roi = existing["character_name_roi"] or "{}"
+            if not costume_roi:
+                costume_roi = existing["costume_name_roi"] or "{}"
+        else:
+            char_roi = char_roi or "{}"
+            costume_roi = costume_roi or "{}"
+
         conn.execute(
-            """INSERT INTO resolutions
-               (width, height, dpi, name, gacha_btn_pos, skip_btn_pos, confirm_btn_pos, result_roi, screenshot_roi)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT OR REPLACE INTO resolutions
+               (width, height, dpi, name, gacha_btn_pos, skip_btn_pos, confirm_btn_pos, result_roi, screenshot_roi, character_name_roi, costume_name_roi)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                data["width"],
-                data["height"],
-                data["dpi"],
-                data["name"],
-                data.get("gacha_btn_pos", "{}"),
-                data.get("skip_btn_pos", "{}"),
-                data.get("confirm_btn_pos", "{}"),
-                data.get("result_roi", "{}"),
-                data.get("screenshot_roi", "{}"),
+                w,
+                h,
+                dpi,
+                name,
+                data.get("gacha_btn_pos") or "{}",
+                data.get("skip_btn_pos") or "{}",
+                data.get("confirm_btn_pos") or "{}",
+                data.get("result_roi") or "{}",
+                data.get("screenshot_roi") or "{}",
+                char_roi,
+                costume_roi,
             ),
         )
         conn.commit()
         conn.close()
         return jsonify(
-            {"status": "success", "message": "해상도 데이터가 추가되었습니다."}
+            {
+                "status": "success",
+                "message": f"해상도 [{name}] 데이터가 추가/수정되었습니다.",
+            }
         )
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 500
@@ -1660,10 +2222,19 @@ def add_resolution():
 def delete_resolution():
     try:
         data = request.json
+        if not data:
+            return (
+                jsonify({"status": "error", "message": "데이터가 누락되었습니다."}),
+                400,
+            )
+        w = int(data.get("width") or 0)
+        h = int(data.get("height") or 0)
+        dpi = int(data.get("dpi") or 0)
+
         conn = get_db_connection()
         conn.execute(
             "DELETE FROM resolutions WHERE width = ? AND height = ? AND dpi = ?",
-            (data["width"], data["height"], data["dpi"]),
+            (w, h, dpi),
         )
         conn.commit()
         conn.close()
@@ -1729,18 +2300,23 @@ def save_costume():
         else:
             # ID가 없는 경우, 코스튬 이름이 이미 DB에 존재하는지 확인
             existing = conn.execute(
-                "SELECT id FROM costumes WHERE costume_name = ?", (costume_name,)
+                "SELECT id, rarity FROM costumes WHERE costume_name = ?",
+                (costume_name,),
             ).fetchone()
 
             if existing:
-                # 이름이 같으면 해당 항목의 레어도와 이미지를 업데이트
+                # 이미 존재하는 코스튬 이미지 갱신 시: 기존 성급(rarity)은 보존하고 이미지만 업데이트
+                preserved_rarity = existing["rarity"]
                 conn.execute(
                     """
                     UPDATE costumes
-                    SET rarity = ?, image_filename = ?
-                    WHERE costume_name = ?
+                    SET image_filename = ?
+                    WHERE id = ?
                     """,
-                    (rarity, new_image_path, costume_name),
+                    (new_image_path, existing["id"]),
+                )
+                debug_log(
+                    f"코스튬 이미지 갱신 완료: {costume_name} (기존 {preserved_rarity}성 보존)"
                 )
             else:
                 # 완전 신규 등록
@@ -1754,6 +2330,7 @@ def save_costume():
 
         conn.commit()
         conn.close()
+        clear_template_cache()
         return jsonify(
             {
                 "status": "success",
@@ -1774,6 +2351,7 @@ def delete_costume():
         )
         conn.commit()
         conn.close()
+        clear_template_cache()
         return jsonify(
             {"status": "success", "message": "코스튬 데이터가 삭제되었습니다."}
         )
@@ -1923,6 +2501,7 @@ def register_unrecognized():
         old_path = os.path.join(UNRECOGNIZED_DIR, filename)
         new_filename = f"{full_name}.png"
         new_path = os.path.join(COSTUMES_DIR, new_filename)
+        rel_db_path = os.path.join("costumes", new_filename)
 
         if not os.path.exists(old_path):
             return jsonify(
@@ -1935,32 +2514,46 @@ def register_unrecognized():
         # DB에 신규 레어도 반영하여 등록
         conn = get_db_connection()
         existing = conn.execute(
-            "SELECT id FROM costumes WHERE costume_name = ?", (full_name,)
+            "SELECT id, rarity FROM costumes WHERE costume_name = ?", (full_name,)
         ).fetchone()
 
         if existing:
-            # 이미 있으면 덮어쓰기 (레어도 포함)
+            # 이미 존재하는 코스튬 이미지 갱신 시: 기존 성급(rarity)은 보존하고 이미지만 갱신
+            preserved_rarity = existing["rarity"]
             conn.execute(
-                "UPDATE costumes SET rarity = ?, image_filename = ? WHERE costume_name = ?",
-                (rarity, new_path, full_name),
+                "UPDATE costumes SET image_filename = ? WHERE id = ?",
+                (rel_db_path, existing["id"]),
+            )
+            conn.commit()
+            conn.close()
+            clear_template_cache()
+
+            debug_log(
+                f"미인식 이미지 갱신 완료: {full_name} (기존 {preserved_rarity}성 보존)"
+            )
+            return jsonify(
+                {
+                    "status": "success",
+                    "message": f"{full_name} (기존 {preserved_rarity}성 유지) 이미지가 성공적으로 갱신되었습니다.",
+                }
             )
         else:
             # 없으면 새로 추가
             conn.execute(
                 "INSERT INTO costumes (costume_name, rarity, image_filename) VALUES (?, ?, ?)",
-                (full_name, rarity, new_path),
+                (full_name, rarity, rel_db_path),
             )
+            conn.commit()
+            conn.close()
+            clear_template_cache()
 
-        conn.commit()
-        conn.close()
-
-        debug_log(f"미인식 이미지 등록 완료: {full_name} ({rarity}성)")
-        return jsonify(
-            {
-                "status": "success",
-                "message": f"{full_name} ({rarity}성) 등록이 완료되었습니다.",
-            }
-        )
+            debug_log(f"미인식 이미지 등록 완료: {full_name} ({rarity}성)")
+            return jsonify(
+                {
+                    "status": "success",
+                    "message": f"{full_name} ({rarity}성) 등록이 완료되었습니다.",
+                }
+            )
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)})
 
