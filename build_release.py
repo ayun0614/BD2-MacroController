@@ -12,6 +12,9 @@ if sys.platform == "win32":
         pass
 
 
+VERSION = "1.2.0"
+
+
 def build():
     base_dir = os.path.dirname(os.path.abspath(__file__))
     dist_dir = os.path.join(base_dir, "dist")
@@ -20,7 +23,7 @@ def build():
     zip_path = os.path.join(dist_dir, "BD2Controller_Release.zip")
 
     print("=" * 60)
-    print("[시작] BD2 Controller 원클릭 배포 패키지 빌드를 시작합니다.")
+    print(f"[시작] BD2 Controller v{VERSION} 원클릭 배포 패키지 빌드를 시작합니다.")
     print("=" * 60)
 
     # 1. PyInstaller 실행 명령어 구성
@@ -122,8 +125,8 @@ def build():
 
     # 3. 간단한 사용 안내 README.txt 생성
     readme_path = os.path.join(output_app_dir, "README.txt")
-    readme_content = """============================================================
-  BD2 Controller - 브라운더스트2 매크로 컨트롤러
+    readme_content = f"""============================================================
+  BD2 Controller v{VERSION} - 브라운더스트2 매크로 컨트롤러
 ============================================================
 
 [실행 방법]

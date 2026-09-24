@@ -37,6 +37,8 @@ template_dir = os.path.join(base_dir, "template")
 static_dir = os.path.join(base_dir, "static")
 app = Flask(__name__, template_folder=template_dir, static_folder=static_dir)
 
+APP_VERSION = "1.2.0"
+
 CONFIG_PATH = os.path.join(base_dir, "config.yaml")
 BACKUP_DIR = os.path.join(base_dir, "backup")
 COSTUMES_DIR = os.path.join(base_dir, "costumes")
@@ -1848,7 +1850,12 @@ def run_gacha_macro_loop():
 # ==============================================================================
 @app.route("/")
 def index():
-    return render_template("index.html")
+    return render_template("index.html", version=APP_VERSION)
+
+
+@app.route("/api/version", methods=["GET"])
+def get_version():
+    return jsonify({"version": APP_VERSION})
 
 
 @app.route("/favicon.ico")
@@ -2671,5 +2678,6 @@ def open_browser():
 
 
 if __name__ == "__main__":
+    print(f"[*] BD2 Controller v{APP_VERSION} 시작...")
     Timer(1.5, open_browser).start()
     app.run(host="0.0.0.0", port=5000, debug=False)

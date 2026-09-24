@@ -4,7 +4,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>BD2 Controller Panel</title>
+  <title>BD2 Controller Panel v{{ version | default('1.2.0') }}</title>
   <link rel="shortcut icon" href="{{ url_for('static', filename='favicon.ico') }}">
   <link rel="stylesheet" href="/static/css/style.css">
   <style>
@@ -32,7 +32,7 @@
 
 <body>
   <div class="container">
-    <h1>BD2 Controller Web UI</h1>
+    <h1>BD2 Controller Web UI <span style="font-size: 0.85rem; color: #a0a0a0; font-weight: normal; vertical-align: middle;">v{{ version | default('1.2.0') }}</span></h1>
     <nav class="tab-menu">
       <button class="tab-btn active" onclick="openTab(event, 'tab-main')">무한뽑기 매크로</button>
       <button class="tab-btn" onclick="openTab(event, 'tab-db')">DB 데이터 관리</button>
